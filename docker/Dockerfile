@@ -1,40 +1,58 @@
-FROM alphacep/kaldi-vosk-server-gpu:latest
+FROM nvidia/cuda:12.8.0-cudnn9-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-ARG MODEL_URL=https://alphacephei.com/vosk/models/vosk-model-en-us-0.22.zip
-ARG MODEL_NAME=vosk-model-en-us-0.22
-
-# Base already contains CUDA-enabled libvosk; install runtime tools and Python
+# System deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv \
-    ffmpeg libsndfile1 git curl ca-certificates unzip \
-    && rm -rf /var/lib/apt/lists/*
+    python3.10 python3.10-venv python3-pip \
+    curl ca-certificates ffmpeg tini && \
+    rm -rf /var/lib/apt/lists/*
 
+# Python venv
+RUN python3.10 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+# GPU-enabled sherpa-onnx (CUDA 12.x + cuDNN9), plus runtime libs
+RUN python -m pip install --upgrade pip && \
+    pip install 'sherpa-onnx==1.12.13+cuda12.cudnn9' \
+      -f https://k2-fsa.github.io/sherpa/onnx/cuda.html && \
+    pip install websockets uvloop numpy
+
+# Models
+RUN mkdir -p /models/asr /models/punct
+# ASR: Streaming Zipformer (English)
+RUN curl -L -o /models/asr/model.tar.bz2 \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2 \
+ && tar -C /models/asr -xf /models/asr/model.tar.bz2 \
+ && rm /models/asr/model.tar.bz2
+# Punctuation + casing (English)
+RUN curl -L -o /models/punct/punct.tar.bz2 \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2 \
+ && tar -C /models/punct -xf /models/punct/punct.tar.bz2 \
+ && rm /models/punct/punct.tar.bz2
+
+# App
 WORKDIR /app
-
-COPY requirements.txt /app/requirements.txt
-# Important: do NOT install PyPI 'vosk'; keep the GPU lib from the base image
-RUN sed -i '/^vosk[=<>]/d' /app/requirements.txt && \
-    python3 -m pip install --no-cache-dir -r /app/requirements.txt
-
-RUN mkdir -p /models/en /tmp/model && \
-    curl -L -o /tmp/model.zip "$MODEL_URL" && \
-    unzip -q /tmp/model.zip -d /tmp/model && \
-    mv "/tmp/model/$MODEL_NAME"/* /models/en/ && \
-    rm -rf /tmp/model /tmp/model.zip
-
-COPY server /app/server
+COPY server/ /app/
 COPY tests /app/tests
 COPY samples /app/samples
 
-ENV MODEL_DIR=/models/en \
-    HOST=0.0.0.0 \
-    PORT=8000 \
-    CONCURRENCY=64 \
-    LOG_LEVEL=INFO
+# Defaults; tune at run time via -e
+ENV WS_HOST=0.0.0.0 \
+    WS_PORT=8000 \
+    SAMPLE_RATE=16000 \
+    PROVIDER=cuda \
+    MAX_BATCH=64 \
+    MAX_CONNECTIONS=2048 \
+    PARTIAL_HZ=20 \
+    ENDPOINT_RULE1_MS=800 \
+    ENDPOINT_RULE2_MS=400 \
+    ENDPOINT_RULE3_MIN_UTT_MS=800 \
+    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26 \
+    PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06
 
 EXPOSE 8000
-ENTRYPOINT []
-CMD ["python3", "-m", "server.ws_server"]
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["python","-O","app.py"]
