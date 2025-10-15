@@ -243,7 +243,7 @@ async def main():
         compression=None,
         max_queue=1024,
     ):
-        print(f"[sherpa-asr] WebSocket ready on ws://{HOST}:{PORT}/ws  provider={PROVIDER}  batch={MAX_BATCH}")
+        print(f"[sherpa-asr] WebSocket ready on ws://{HOST}:{PORT}  provider={PROVIDER}  batch={MAX_BATCH}")
         stop = asyncio.Future()
         for sig in (signal.SIGTERM, signal.SIGINT):
             asyncio.get_event_loop().add_signal_handler(sig, stop.cancel)

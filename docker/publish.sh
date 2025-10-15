@@ -3,12 +3,13 @@ set -euo pipefail
 
 usage() {
   cat <<USAGE
-Usage: DOCKER_IMAGE=<username/repo> [DOCKER_TAG=latest] [DOCKER_PLATFORM=linux/amd64] ./docker/publish.sh
+Usage: DOCKER_IMAGE=<username/repo> [DOCKER_TAG=latest] [DOCKER_PLATFORM=linux/amd64] [DOCKER_BASE=...] ./docker/publish.sh
 
 Environment variables:
   DOCKER_IMAGE     (required) Docker Hub repository, e.g. myuser/sherpa-asr
   DOCKER_TAG       (optional) Tag to apply/push (default: latest)
   DOCKER_PLATFORM  (optional) Target platform for buildx (default: linux/amd64)
+  DOCKER_BASE      (optional) Override CUDA base image (passed as BASE_IMAGE build-arg)
 
 The script uses 'docker buildx build --platform=...' and pushes the image.
 Ensure you're logged in with 'docker login'.
@@ -32,11 +33,22 @@ DOCKER_PLATFORM=${DOCKER_PLATFORM:-linux/amd64}
 IMAGE_REF="${DOCKER_IMAGE}:${DOCKER_TAG}"
 
 echo "[publish] Building ${IMAGE_REF} for platform ${DOCKER_PLATFORM} (buildx)"
-docker buildx build \
-  --platform="${DOCKER_PLATFORM}" \
-  --tag "${IMAGE_REF}" \
-  --file docker/Dockerfile \
-  --push \
-  .
+if [[ -n "${DOCKER_BASE:-}" ]]; then
+  echo "[publish] Using base image: ${DOCKER_BASE}"
+  docker buildx build \
+    --build-arg BASE_IMAGE="${DOCKER_BASE}" \
+    --platform="${DOCKER_PLATFORM}" \
+    --tag "${IMAGE_REF}" \
+    --file docker/Dockerfile \
+    --push \
+    .
+else
+  docker buildx build \
+    --platform="${DOCKER_PLATFORM}" \
+    --tag "${IMAGE_REF}" \
+    --file docker/Dockerfile \
+    --push \
+    .
+fi
 
 echo "[publish] Done"

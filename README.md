@@ -1,11 +1,11 @@
-# Sherpa-ONNX GPU Streaming ASR Server (Zipformer-RNNT, EN) with Online Punctuation
+# Yap Sherpa-ONNX GPU Streaming ASR Server
 
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding and online punctuation + true-casing on final segments. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What’s inside
 - Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26`
 - English online punctuation + casing: `sherpa-onnx-online-punct-en-2024-08-06`
-- CUDA 12.8 + cuDNN 9 runtime; GPU-enabled `sherpa-onnx` wheel
+- CUDA 12.x runtime + cuDNN 9 wheel (installed via pip); GPU-enabled `sherpa-onnx`
 - Batched decode across ready streams for high throughput (L40S-ready)
 
 ## Quick start (Docker, GPU)
@@ -86,6 +86,16 @@ bash docker/publish.sh
 
 # Verify
 docker buildx imagetools inspect ${DOCKER_IMAGE}:${DOCKER_TAG}
+```
+
+If the default CUDA base image tag is unavailable in your registry mirror, override it:
+
+```bash
+export DOCKER_IMAGE=<your-dockerhub-user>/sherpa-asr
+export DOCKER_TAG=latest
+# Example: override base image if your mirror lacks defaults
+export DOCKER_BASE=nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+bash docker/publish.sh
 ```
 
 ## Sources
