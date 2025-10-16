@@ -3,19 +3,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
+import sys
 import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import websockets
 import websockets.server
 import uvloop  # type: ignore
 import sherpa_onnx as so
+
+print(f"[sherpa-asr] sherpa_onnx version: {so.__version__}")
+
+# ---- Logging setup ----
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
+)
+LOG = logging.getLogger("sherpa-asr")
 
 # ---- Protocol constants (match bench/client) ----
 CONTROL_PREFIX = b"__CTRL__:"
@@ -37,8 +49,6 @@ ENDPOINT_RULE2_MS = int(os.getenv("ENDPOINT_RULE2_MS", "400"))
 ENDPOINT_RULE3_MIN_UTT_MS = int(os.getenv("ENDPOINT_RULE3_MIN_UTT_MS", "800"))
 
 ASR_DIR = Path(os.getenv("ASR_DIR", ""))
-PUNCT_DIR = Path(os.getenv("PUNCT_DIR", ""))
-PUNCT_THREADS = max(1, int(os.getenv("PUNCT_THREADS", "1")))
 
 
 def _pick_one(dir_: Path, prefix: str) -> str:
@@ -51,120 +61,85 @@ def _pick_one(dir_: Path, prefix: str) -> str:
 
 
 def _load_asr() -> so.OnlineRecognizer:
+    """Load ASR model using sherpa-onnx v1.12.14 OnlineRecognizer pattern."""
     enc = _pick_one(ASR_DIR, "encoder")
     dec = _pick_one(ASR_DIR, "decoder")
     joi = _pick_one(ASR_DIR, "joiner")
     tok = str(ASR_DIR / "tokens.txt")
 
-    # Prefer config-based constructor (newer sherpa-onnx), fall back to legacy kwargs
-    try:
-        FeatureConfig = getattr(so, "FeatureConfig")
-        OnlineTransducerModelConfig = getattr(so, "OnlineTransducerModelConfig")
-        OnlineRecognizerConfig = getattr(so, "OnlineRecognizerConfig")
-        EndpointConfig = getattr(so, "EndpointConfig")
+    # 1. Feature Extractor Config
+    feat_config = so.FeatureExtractorConfig(
+        sampling_rate=SAMPLE_RATE,
+        feature_dim=80
+    )
 
-        cfg = OnlineRecognizerConfig(
-            feat_config=FeatureConfig(sample_rate=SAMPLE_RATE, feature_dim=80),
-            model_config=OnlineTransducerModelConfig(
-                encoder=enc,
-                decoder=dec,
-                joiner=joi,
-                tokens=tok,
-                provider=PROVIDER,
-            ),
-            decoding_method="greedy_search",
-            enable_endpoint_detection=True,
-            endpoint_config=EndpointConfig(
-                rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
-                rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
-                rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
-            ),
-        )
-        return so.OnlineRecognizer(cfg)
-    except Exception:
-        # Legacy constructor (older sherpa-onnx)
-        try:
-            return so.OnlineRecognizer(
-                tokens=tok,
-                encoder=enc,
-                decoder=dec,
-                joiner=joi,
-                sample_rate=SAMPLE_RATE,
-                feature_dim=80,
-                provider=PROVIDER,
-                decoding_method="greedy_search",
-                enable_endpoint_detection=True,
-                rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
-                rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
-                rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
-            )
-        except Exception:
-            traceback.print_exc()
-            raise
+    # 2. Transducer Model Config
+    transducer_cfg = so.OnlineTransducerModelConfig(
+        encoder=enc,
+        decoder=dec,
+        joiner=joi
+    )
 
+    # 3. Provider Config for GPU/CPU
+    provider = PROVIDER if PROVIDER in ("cpu", "cuda") else "cpu"
+    provider_cfg = so.ProviderConfig(provider=provider, device=0)
 
-def _load_punct():
-    """
-    Returns callable(text:str)->str using sherpa-onnx online punctuation (English).
-    Prefers add_punctuation_with_case; falls back to process().
-    """
-    try:
-        bpe_vocab = str(PUNCT_DIR / "bpe.vocab")
-        model_onnx = str(PUNCT_DIR / "model.onnx")
-        if not os.path.exists(bpe_vocab) or not os.path.exists(model_onnx):
-            raise FileNotFoundError(f"Punctuation files not found under {PUNCT_DIR}")
+    # 4. Online Model Config with all required sub-configs
+    model_config = so.OnlineModelConfig(
+        transducer=transducer_cfg,
+        paraformer=so.OnlineParaformerModelConfig(),  # empty for unused model type
+        wenet_ctc=so.OnlineWenetCtcModelConfig(),     # empty for unused model type
+        zipformer2_ctc=so.OnlineZipformer2CtcModelConfig(),  # empty for unused model type
+        nemo_ctc=so.OnlineNeMoCtcModelConfig(),       # empty for unused model type
+        provider_config=provider_cfg,
+        tokens=tok,
+        num_threads=1,
+        warm_up=0,
+        debug=False,
+        model_type="",
+        modeling_unit="",
+        bpe_vocab=""
+    )
 
-        # Prefer config-based constructor (newer sherpa-onnx), fall back to legacy kwargs
-        punct = None
-        try:
-            OnlinePunctuationModelConfig = getattr(so, "OnlinePunctuationModelConfig")
-            OnlinePunctuationConfig = getattr(so, "OnlinePunctuationConfig")
-            cfg = OnlinePunctuationConfig(
-                model=OnlinePunctuationModelConfig(
-                    cnn_bilstm=model_onnx,
-                    bpe_vocab=bpe_vocab,
-                    provider="cpu",
-                    num_threads=PUNCT_THREADS,
-                )
-            )
-            punct = so.OnlinePunctuation(cfg)
-        except Exception:
-            # Legacy signature
-            punct = so.OnlinePunctuation(
-                cnn_bilstm=model_onnx,
-                bpe_vocab=bpe_vocab,
-                provider="cpu",
-                num_threads=PUNCT_THREADS,
-            )
+    # 5. Endpoint Config
+    endpoint_config = so.EndpointConfig(
+        rule1=so.EndpointRule(False, ENDPOINT_RULE1_MS / 1000.0, 0.0),
+        rule2=so.EndpointRule(True, ENDPOINT_RULE2_MS / 1000.0, 0.0),
+        rule3=so.EndpointRule(False, 0.0, ENDPOINT_RULE3_MIN_UTT_MS / 1000.0),
+    )
 
-        # Bind the punctuation method (prefer the modern API)
-        if hasattr(punct, "add_punctuation_with_case"):
-            add = punct.add_punctuation_with_case
+    # 6. Online Recognizer Config 
+    recognizer_config = so.OnlineRecognizerConfig(
+        feat_config=feat_config,
+        model_config=model_config,
+        lm_config=so.OnlineLMConfig(),  # no LM (use default)
+        endpoint_config=endpoint_config,
+        enable_endpoint=True,
+        decoding_method="greedy_search",
+        max_active_paths=4,  # for beam search (if using modified_beam_search)
+        hotwords_file="",
+        hotwords_score=0.0,  # 0 disables hotword boosting
+        blank_penalty=0.0,
+        temperature_scale=2.0,
+        rule_fsts="",
+        rule_fars="",
+        reset_encoder=False,
+        hr=so.HomophoneReplacerConfig()
+    )
 
-            def _fn(txt: str) -> str:
-                return add(txt)
-
-            return _fn
-
-        # Fallback for older wheels
-        if hasattr(punct, "process"):
-
-            def _fn(txt: str) -> str:
-                return punct.process(txt)
-
-            return _fn
-
-        raise RuntimeError(
-            "OnlinePunctuation does not expose add_punctuation_with_case or process"
-        )
-    except Exception:
-        traceback.print_exc()
-        # If punctuation is critical, re-raise to fail fast
-        raise
+    # 7. Instantiate the OnlineRecognizer
+    recognizer = so.OnlineRecognizer(recognizer_config)
+    return recognizer
 
 
-RECOGNIZER = _load_asr()
-PUNCTUATE = _load_punct()
+RECOGNIZER: Optional[so.OnlineRecognizer] = None
+
+
+def _need_recognizer() -> so.OnlineRecognizer:
+    """Guard to ensure recognizer is initialized before use."""
+    if RECOGNIZER is None:
+        raise RuntimeError("Recognizer not initialized")
+    return RECOGNIZER
 
 
 @dataclass
@@ -194,7 +169,7 @@ async def decode_loop():
         ready: List[Client] = []
         for c in list(CLIENTS.values()):
             try:
-                if RECOGNIZER.is_ready(c.stream):
+                if _need_recognizer().is_ready(c.stream):
                     ready.append(c)
             except Exception:
                 continue
@@ -202,28 +177,26 @@ async def decode_loop():
         for i in range(0, len(ready), MAX_BATCH):
             part = ready[i : i + MAX_BATCH]
             if part:
-                RECOGNIZER.decode_streams([c.stream for c in part])
+                _need_recognizer().decode_streams([c.stream for c in part])
 
         now = time.perf_counter()
         for c in list(CLIENTS.values()):
             try:
                 if (now - c.last_emit_ts) >= EMIT_INTERVAL:
-                    res = RECOGNIZER.get_result(c.stream)
+                    res = _need_recognizer().get_result(c.stream)
                     text = (res.text or "").strip()
                     if text and text != c.last_partial:
                         await safe_send(c.ws, {"type": "partial", "text": text})
                         c.last_partial = text
                         c.last_emit_ts = now
 
-                if RECOGNIZER.is_endpoint(c.stream) or (c.ended and not RECOGNIZER.is_ready(c.stream)):
-                    final_res = RECOGNIZER.get_result(c.stream)
+                if _need_recognizer().is_endpoint(c.stream) or (c.ended and not _need_recognizer().is_ready(c.stream)):
+                    final_res = _need_recognizer().get_result(c.stream)
                     final_text = (final_res.text or "").strip()
-                    if final_text:
-                        final_text = PUNCTUATE(final_text)
                     await safe_send(c.ws, {"type": "final", "text": final_text})
                     if c.ended:
                         c.done = True
-                    RECOGNIZER.reset(c.stream)
+                    _need_recognizer().reset(c.stream)
             except Exception:
                 traceback.print_exc()
                 c.done = True
@@ -250,7 +223,7 @@ async def handle_ws(ws: websockets.server.WebSocketServerProtocol):
         if len(CLIENTS) >= MAX_CONNECTIONS:
             await ws.close(code=1013, reason="Overloaded")
             return
-        stream = RECOGNIZER.create_stream()
+        stream = _need_recognizer().create_stream()
         cid = _next_id()
         CLIENTS[cid] = Client(ws=ws, stream=stream)
 
@@ -282,6 +255,30 @@ async def handle_ws(ws: websockets.server.WebSocketServerProtocol):
 
 
 async def main():
+    global RECOGNIZER
+    
+    # Preflight logging - show configuration before attempting to load
+    LOG.info("ASR_DIR=%s PROVIDER=%s SAMPLE_RATE=%s", ASR_DIR, PROVIDER, SAMPLE_RATE)
+    LOG.info("EMIT_INTERVAL=%.3f MAX_BATCH=%d", EMIT_INTERVAL, MAX_BATCH)
+    LOG.info("MAX_CONNECTIONS=%d HOST=%s PORT=%s", MAX_CONNECTIONS, HOST, PORT)
+    LOG.info("Endpoint rules: RULE1=%dms RULE2=%dms RULE3_MIN_UTT=%dms", 
+             ENDPOINT_RULE1_MS, ENDPOINT_RULE2_MS, ENDPOINT_RULE3_MIN_UTT_MS)
+    
+    try:
+        # Debug: show what this wheel exports (helps future upgrades)
+        names = [n for n in dir(so) if "Config" in n or "Recognizer" in n or "Stream" in n]
+        LOG.info("sherpa_onnx %s exports: %s", getattr(so, "__version__", "?"), names)
+        
+        LOG.info("Loading ASR model...")
+        RECOGNIZER = _load_asr()
+        LOG.info("✅ Zipformer loaded (provider=%s) from %s", PROVIDER, ASR_DIR)
+    except Exception:
+        LOG.exception("FATAL: failed to load recognizer")
+        # Keep container alive so logs are visible
+        LOG.error("Container will sleep for 1 hour to allow log inspection...")
+        await asyncio.sleep(3600)
+        return
+
     asyncio.create_task(decode_loop())
 
     async with websockets.serve(
@@ -294,7 +291,7 @@ async def main():
         compression=None,
         max_queue=1024,
     ):
-        print(f"[sherpa-asr] WebSocket ready on ws://{HOST}:{PORT}  provider={PROVIDER}  batch={MAX_BATCH}")
+        LOG.info("🚀 WebSocket ready on ws://%s:%s  provider=%s  batch=%s", HOST, PORT, PROVIDER, MAX_BATCH)
         stop = asyncio.Future()
         for sig in (signal.SIGTERM, signal.SIGINT):
             asyncio.get_event_loop().add_signal_handler(sig, stop.cancel)

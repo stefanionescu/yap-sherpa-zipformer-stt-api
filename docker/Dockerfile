@@ -5,7 +5,10 @@ FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONFAULTHANDLER=1 \
+    PIP_NO_CACHE_DIR=1 \
+    ORT_LOG_SEVERITY_LEVEL=0 \
+    ORT_LOG_VERBOSITY_LEVEL=1
 
 # System deps (+ bzip2/lbzip2: needed for .tar.bz2 archives)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,17 +28,14 @@ RUN python -m pip install --upgrade pip && \
     pip install websockets uvloop numpy soundfile
 
 # Models
-RUN mkdir -p /models/asr /models/punct
+RUN mkdir -p /models/asr
 # ASR: Streaming Zipformer (English)
 RUN curl -L -o /models/asr/model.tar.bz2 \
       https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2 \
  && tar -C /models/asr -xjf /models/asr/model.tar.bz2 \
- && rm /models/asr/model.tar.bz2
-# Punctuation + casing (English)
-RUN curl -L -o /models/punct/punct.tar.bz2 \
-      https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-online-punct-en-2024-08-06.tar.bz2 \
- && tar -C /models/punct -xjf /models/punct/punct.tar.bz2 \
- && rm /models/punct/punct.tar.bz2
+ && rm /models/asr/model.tar.bz2 \
+ && echo "=== Model files extracted ===" \
+ && find /models/asr -maxdepth 2 -type f -printf '%P\n' | sort
 
 # App
 WORKDIR /app
@@ -54,10 +54,11 @@ ENV WS_HOST=0.0.0.0 \
     ENDPOINT_RULE1_MS=800 \
     ENDPOINT_RULE2_MS=400 \
     ENDPOINT_RULE3_MIN_UTT_MS=800 \
-    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26 \
-    PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06 \
-    PUNCT_THREADS=1
+    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26
+
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini","-s","--"]
+# During debugging, keep logs visible if python exits:
+# CMD ["bash","-lc","python -O app.py || { echo exit=$?; sleep 3600; }"]
 CMD ["python","-O","app.py"]

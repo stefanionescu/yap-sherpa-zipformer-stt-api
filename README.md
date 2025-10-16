@@ -1,10 +1,9 @@
 # Yap Sherpa-ONNX GPU Streaming ASR Server
 
-GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding and online punctuation + true-casing on final segments. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
+GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What’s inside
 - Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26`
-- English online punctuation + casing: `sherpa-onnx-online-punct-en-2024-08-06`
 - CUDA 12.x runtime + cuDNN 9 wheel (installed via pip); GPU-enabled `sherpa-onnx`
 - Batched decode across ready streams for high throughput (L40S-ready)
 
@@ -29,7 +28,7 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - Terminate stream with control frame: `b"__CTRL__:EOS"`
 - Receive JSON text frames:
   - Partial: `{ "type": "partial", "text": "..." }` (no punctuation)
-  - Final: `{ "type": "final", "text": "..." }` (punctuation + casing applied)
+  - Final: `{ "type": "final", "text": "..." }` (stable segment text)
 
 ## Config (env vars)
 - `WS_HOST` (default `0.0.0.0`)
@@ -41,10 +40,9 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `PARTIAL_HZ` (partials per second per client; default `20`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
 - `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26`)
-- `PUNCT_DIR` (default `/models/punct/sherpa-onnx-online-punct-en-2024-08-06`)
 
 ## Included models
-The container downloads and unpacks both ASR and punctuation models at build time under `/models`.
+The container downloads and unpacks the ASR model at build time under `/models`.
 
 ## Smoke tests (included clients)
 
@@ -63,7 +61,6 @@ The `samples/` directory is copied into the image and available at `/app/samples
 
 ## Why this stack
 - Sherpa-ONNX Zipformer RNNT: optimized for streaming; exposes `decode_streams()` for batch GPU decode
-- Online punctuation + casing (EN): tiny CNN-BiLSTM model; near-zero overhead on CPU for finals
 - CUDA 12.x + cuDNN 9 wheels: straightforward L40S deployment
 
 ## Notes & tuning
@@ -101,4 +98,3 @@ bash docker/publish.sh
 ## Sources
 - Sherpa-ONNX GPU install (CUDA 12.8 + cuDNN 9): `https://k2-fsa.github.io/sherpa/onnx/python/install.html`
 - Streaming Zipformer (EN): `https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html#streaming-zipformer-en-2023-06-26`
-- Punctuation + casing (EN): `https://k2-fsa.github.io/sherpa/onnx/punctuation/pretrained_models.html#sherpa-onnx-online-punct-en-2024-08-06`
