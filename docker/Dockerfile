@@ -7,7 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONFAULTHANDLER=1 \
     PIP_NO_CACHE_DIR=1 \
-    ORT_LOG_SEVERITY_LEVEL=0 \
+    SHERPA_ONNX_LOG=1 \
+    ORT_LOG_SEVERITY_LEVEL=1 \
     ORT_LOG_VERBOSITY_LEVEL=1
 
 # System deps (+ bzip2/lbzip2: needed for .tar.bz2 archives)
@@ -21,10 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3.10 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
-# sherpa-onnx with ONNX Runtime GPU (CUDA 12 + cuDNN 9)
+# sherpa-onnx with CUDA (includes a matching ORT inside their wheel)
 RUN python -m pip install --upgrade pip && \
-    pip install "onnxruntime-gpu>=1.20" && \
-    pip install "sherpa-onnx==1.12.14" && \
+    pip uninstall -y onnxruntime onnxruntime-gpu || true && \
+    pip install 'sherpa-onnx==1.12.14+cuda12.cudnn9' \
+      -f https://k2-fsa.github.io/sherpa/onnx/cuda.html && \
     pip install websockets uvloop numpy soundfile
 
 # Models
