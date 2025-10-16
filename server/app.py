@@ -38,6 +38,7 @@ ENDPOINT_RULE3_MIN_UTT_MS = int(os.getenv("ENDPOINT_RULE3_MIN_UTT_MS", "800"))
 
 ASR_DIR = Path(os.getenv("ASR_DIR", ""))
 PUNCT_DIR = Path(os.getenv("PUNCT_DIR", ""))
+PUNCT_THREADS = max(1, int(os.getenv("PUNCT_THREADS", "1")))
 
 
 def _pick_one(dir_: Path, prefix: str) -> str:
@@ -105,41 +106,61 @@ def _load_asr() -> so.OnlineRecognizer:
 def _load_punct():
     """
     Returns callable(text:str)->str using sherpa-onnx online punctuation (English).
-    Falls back to identity if something goes wrong.
+    Prefers add_punctuation_with_case; falls back to process().
     """
     try:
         bpe_vocab = str(PUNCT_DIR / "bpe.vocab")
         model_onnx = str(PUNCT_DIR / "model.onnx")
+        if not os.path.exists(bpe_vocab) or not os.path.exists(model_onnx):
+            raise FileNotFoundError(f"Punctuation files not found under {PUNCT_DIR}")
+
+        # Prefer config-based constructor (newer sherpa-onnx), fall back to legacy kwargs
+        punct = None
         try:
+            OnlinePunctuationModelConfig = getattr(so, "OnlinePunctuationModelConfig")
+            OnlinePunctuationConfig = getattr(so, "OnlinePunctuationConfig")
+            cfg = OnlinePunctuationConfig(
+                model=OnlinePunctuationModelConfig(
+                    cnn_bilstm=model_onnx,
+                    bpe_vocab=bpe_vocab,
+                    provider="cpu",
+                    num_threads=PUNCT_THREADS,
+                )
+            )
+            punct = so.OnlinePunctuation(cfg)
+        except Exception:
+            # Legacy signature
             punct = so.OnlinePunctuation(
                 cnn_bilstm=model_onnx,
                 bpe_vocab=bpe_vocab,
                 provider="cpu",
-                num_threads=1,
+                num_threads=PUNCT_THREADS,
             )
+
+        # Bind the punctuation method (prefer the modern API)
+        if hasattr(punct, "add_punctuation_with_case"):
+            add = punct.add_punctuation_with_case
+
+            def _fn(txt: str) -> str:
+                return add(txt)
+
+            return _fn
+
+        # Fallback for older wheels
+        if hasattr(punct, "process"):
 
             def _fn(txt: str) -> str:
                 return punct.process(txt)
 
             return _fn
-        except TypeError:
-            OnlinePunctuationModelConfig = getattr(so, "OnlinePunctuationModelConfig")
-            OnlinePunctuationConfig = getattr(so, "OnlinePunctuationConfig")
-            punct = so.OnlinePunctuation(
-                OnlinePunctuationConfig(
-                    model=OnlinePunctuationModelConfig(
-                        cnn_bilstm=model_onnx, bpe_vocab=bpe_vocab, provider="cpu", num_threads=1
-                    )
-                )
-            )
 
-            def _fn(txt: str) -> str:
-                return punct.process(txt)
-
-            return _fn
+        raise RuntimeError(
+            "OnlinePunctuation does not expose add_punctuation_with_case or process"
+        )
     except Exception:
         traceback.print_exc()
-        return lambda s: s
+        # If punctuation is critical, re-raise to fail fast
+        raise
 
 
 RECOGNIZER = _load_asr()

@@ -55,7 +55,8 @@ ENV WS_HOST=0.0.0.0 \
     ENDPOINT_RULE2_MS=400 \
     ENDPOINT_RULE3_MIN_UTT_MS=800 \
     ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26 \
-    PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06
+    PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06 \
+    PUNCT_THREADS=1
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini","-s","--"]
