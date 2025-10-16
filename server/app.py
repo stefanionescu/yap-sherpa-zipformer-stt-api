@@ -55,21 +55,51 @@ def _load_asr() -> so.OnlineRecognizer:
     joi = _pick_one(ASR_DIR, "joiner")
     tok = str(ASR_DIR / "tokens.txt")
 
-    recognizer = so.OnlineRecognizer(
-        tokens=tok,
-        encoder=enc,
-        decoder=dec,
-        joiner=joi,
-        sample_rate=SAMPLE_RATE,
-        feature_dim=80,
-        provider=PROVIDER,
-        decoding_method="greedy_search",
-        enable_endpoint_detection=True,
-        rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
-        rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
-        rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
-    )
-    return recognizer
+    # Prefer config-based constructor (newer sherpa-onnx), fall back to legacy kwargs
+    try:
+        FeatureConfig = getattr(so, "FeatureConfig")
+        OnlineTransducerModelConfig = getattr(so, "OnlineTransducerModelConfig")
+        OnlineRecognizerConfig = getattr(so, "OnlineRecognizerConfig")
+        EndpointConfig = getattr(so, "EndpointConfig")
+
+        cfg = OnlineRecognizerConfig(
+            feat_config=FeatureConfig(sample_rate=SAMPLE_RATE, feature_dim=80),
+            model_config=OnlineTransducerModelConfig(
+                encoder=enc,
+                decoder=dec,
+                joiner=joi,
+                tokens=tok,
+                provider=PROVIDER,
+            ),
+            decoding_method="greedy_search",
+            enable_endpoint_detection=True,
+            endpoint_config=EndpointConfig(
+                rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
+                rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
+                rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
+            ),
+        )
+        return so.OnlineRecognizer(cfg)
+    except Exception:
+        # Legacy constructor (older sherpa-onnx)
+        try:
+            return so.OnlineRecognizer(
+                tokens=tok,
+                encoder=enc,
+                decoder=dec,
+                joiner=joi,
+                sample_rate=SAMPLE_RATE,
+                feature_dim=80,
+                provider=PROVIDER,
+                decoding_method="greedy_search",
+                enable_endpoint_detection=True,
+                rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
+                rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
+                rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
+            )
+        except Exception:
+            traceback.print_exc()
+            raise
 
 
 def _load_punct():

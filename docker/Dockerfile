@@ -58,5 +58,5 @@ ENV WS_HOST=0.0.0.0 \
     PUNCT_DIR=/models/punct/sherpa-onnx-online-punct-en-2024-08-06
 
 EXPOSE 8000
-ENTRYPOINT ["/usr/bin/tini","--"]
+ENTRYPOINT ["/usr/bin/tini","-s","--"]
 CMD ["python","-O","app.py"]
