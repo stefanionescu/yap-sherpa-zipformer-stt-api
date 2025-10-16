@@ -3,7 +3,7 @@
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What's inside
-- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-21`
+- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-21` (the one from 2023-06-26 has worse performance, especialy wrt filler words)
 - **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
 - Uses **factory method API** (`OnlineRecognizer.from_transducer()`) - the stable public interface
 - Batched decode across ready streams for high throughput (L40S-ready)
@@ -52,7 +52,7 @@ docker run --rm --gpus all -p 8000:8000 \
 Server starts at `ws://0.0.0.0:8000/ws`.
 
 ## WebSocket protocol
-- Send binary frames: PCM16LE mono at 16 kHz (any chunking; 20 ms recommended)
+- Send binary frames: PCM16LE mono at 16 kHz (any chunking; **10ms recommended for low latency**)
 - Terminate stream with control frame: `b"__CTRL__:EOS"`
 - Receive JSON text frames:
   - Partial: `{ "type": "partial", "text": "..." }` (no punctuation)
@@ -67,6 +67,8 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `MAX_BATCH` (default `64`)
 - `MAX_CONNECTIONS` (default `2048`)
 - `PARTIAL_HZ` (partials per second per client; default `20`)
+- `DECODE_BUDGET_MS` (regular decode time budget per loop; default `20`)
+- `FINALIZE_DRAIN_MS` (budget for fully draining finalizing streams; default `100`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
 - `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`)
 
@@ -83,7 +85,7 @@ WS=ws://127.0.0.1:8000/ws python3 tests/client.py --file samples/mid.wav --print
 ### From inside container:
 ```bash
 # Warmup test (fast send to warm GPU kernels)
-python3 tests/warmup.py --file mid.wav --rtf 1.0 --full-text
+python3 tests/warmup.py --file realistic-2.mp3 --rtf 1.0 --full-text
 
 # Concurrency benchmark (synthetic audio)
 python3 tests/bench.py --streams 64 --duration 30 --frame-ms 20 --rtf 1.0 --print-partials

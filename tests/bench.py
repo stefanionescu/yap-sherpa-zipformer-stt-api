@@ -16,7 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url", default=os.getenv("WS", "ws://127.0.0.1:8000"), help="WebSocket endpoint")
     parser.add_argument("--file", default="mid.wav", help="Audio file (absolute path or under samples/)")
     parser.add_argument("--streams", type=int, default=32, help="Number of concurrent streams")
-    parser.add_argument("--frame-ms", type=int, default=20, help="Frame size in milliseconds")
+    parser.add_argument("--frame-ms", type=int, default=10, help="Frame size in milliseconds (10ms optimized for low latency)")
     parser.add_argument("--rtf", type=float, default=1.0, help="Real-time factor for sending audio")
     parser.add_argument("--print-partials", action="store_true", help="Print partial hypotheses")
     return parser.parse_args()

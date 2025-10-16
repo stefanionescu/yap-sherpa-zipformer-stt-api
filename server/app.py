@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
@@ -18,6 +19,11 @@ import websockets
 import websockets.server
 import uvloop  # type: ignore
 import sherpa_onnx as so
+
+# Quiet runtime settings for performance
+os.environ.setdefault("ORT_LOG_SEVERITY_LEVEL", "3")  # 3=error (quiet)
+os.environ.setdefault("ORT_LOG_VERBOSITY_LEVEL", "0")
+os.environ.setdefault("SHERPA_ONNX_LOG", "0")
 
 print(f"[sherpa-asr] sherpa_onnx version: {so.__version__}")
 
@@ -41,8 +47,12 @@ PORT = int(os.getenv("WS_PORT", "8000"))
 PROVIDER = os.getenv("PROVIDER", "cuda")  # "cuda" or "cpu"
 MAX_BATCH = max(1, int(os.getenv("MAX_BATCH", "64")))
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "2048"))
-PARTIAL_HZ = float(os.getenv("PARTIAL_HZ", "20"))  # partials per second per client
+PARTIAL_HZ = float(os.getenv("PARTIAL_HZ", "30"))  # partials per second per client (increased for snappier partials)
 EMIT_INTERVAL = 1.0 / max(1.0, PARTIAL_HZ)
+
+# Decode scheduling knobs (optimized for throughput)
+DRAIN_BUDGET_MS = float(os.getenv("DRAIN_BUDGET_MS", "80"))  # start generous
+LOOP_SLEEP = 0.001  # 1 ms
 
 # Endpointing (aggressive for low latency)
 ENDPOINT_RULE1_MS = int(os.getenv("ENDPOINT_RULE1_MS", "800"))
@@ -52,47 +62,68 @@ ENDPOINT_RULE3_MIN_UTT_MS = int(os.getenv("ENDPOINT_RULE3_MIN_UTT_MS", "800"))
 ASR_DIR = Path(os.getenv("ASR_DIR", ""))
 
 
-def _pick_one(dir_: Path, prefix: str) -> str:
-    """Return a model file path under dir_ with the given prefix, preferring chunked variants."""
-    cand = sorted(p for p in dir_.glob(f"{prefix}*.onnx"))
-    if not cand:
+def _pick_variant(dir_: Path, prefix: str, prefer_int8: bool) -> str:
+    """Return a model file path under dir_ with the given prefix, preferring fp32 on CUDA."""
+    files = sorted(p for p in dir_.glob(f"{prefix}*.onnx"))
+    if not files:
         raise FileNotFoundError(f"Missing {prefix}*.onnx in {dir_}")
-    cand.sort(key=lambda p: (("chunk" not in p.name), p.name))
-    return str(cand[0])
+    # separate int8 and non-int8
+    int8 = [p for p in files if ".int8." in p.name]
+    f32  = [p for p in files if ".int8." not in p.name]
+    # also prefer "chunk" variants within each bucket
+    def score(p: Path) -> tuple[int, str]:
+        # (0 => has 'chunk' => preferred first), then lexicographic
+        return (0 if "chunk" in p.name else 1, p.name)
+    if prefer_int8 and int8:
+        return str(sorted(int8, key=score)[0])
+    if f32:
+        return str(sorted(f32, key=score)[0])
+    # fallback if only int8 exists
+    return str(sorted(int8, key=score)[0])
 
 
 def _load_asr() -> so.OnlineRecognizer:
     """Load ASR model using the canonical sherpa-onnx public API (factory method)."""
-    enc = _pick_one(ASR_DIR, "encoder")
-    dec = _pick_one(ASR_DIR, "decoder")
-    joi = _pick_one(ASR_DIR, "joiner")
+    enc = _pick_variant(ASR_DIR, "encoder", prefer_int8=(PROVIDER != "cuda"))
+    dec = _pick_variant(ASR_DIR, "decoder", prefer_int8=(PROVIDER != "cuda"))
+    joi = _pick_variant(ASR_DIR, "joiner",  prefer_int8=(PROVIDER != "cuda"))
     tok = str(ASR_DIR / "tokens.txt")
 
     # sherpa-onnx canonical public API (works in 1.12.13 and 1.12.14):
-    return so.OnlineRecognizer.from_transducer(
-        tokens=tok,
-        encoder=enc,
-        decoder=dec,
-        joiner=joi,
-        # runtime / features
-        num_threads=max(1, int(os.getenv("NUM_THREADS", "2"))),
-        sample_rate=SAMPLE_RATE,
-        feature_dim=80,
-        # endpointing (seconds) - disabled for client-driven control
-        enable_endpoint_detection=False,   # client controls end via EOS
-        rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
-        rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
-        rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
-        # decoding
-        decoding_method="greedy_search",
-        max_active_paths=4,
-        # provider
-        provider=("cuda" if PROVIDER == "cuda" else "cpu"),
-        device=0,
-        # you can tune these if needed:
-        # cudnn_conv_algo_search=1,
-        # debug=False,
-    )
+    try:
+        recognizer = so.OnlineRecognizer.from_transducer(
+            tokens=tok,
+            encoder=enc,
+            decoder=dec,
+            joiner=joi,
+            # runtime / features
+            num_threads=int(os.getenv("NUM_THREADS", "2")),  # see §3
+            sample_rate=SAMPLE_RATE,
+            feature_dim=80,
+            # endpointing (seconds) - disabled for client-driven control
+            enable_endpoint_detection=False,   # client controls end via EOS
+            rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
+            rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
+            rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
+            # decoding
+            decoding_method="greedy_search",
+            max_active_paths=4,
+            # provider
+            provider=("cuda" if PROVIDER == "cuda" else "cpu"),
+            device=0
+        )
+        
+        # Hard-fail if CUDA was requested but not available
+        if PROVIDER == "cuda":
+            LOG.info("✅ CUDA provider successfully initialized")
+        
+        return recognizer
+        
+    except Exception as e:
+        if PROVIDER == "cuda":
+            raise SystemExit(f"FATAL: CUDA provider not available: {e}")
+        else:
+            raise
 
 
 RECOGNIZER: Optional[so.OnlineRecognizer] = None
@@ -103,6 +134,37 @@ def _need_recognizer() -> so.OnlineRecognizer:
     if RECOGNIZER is None:
         raise RuntimeError("Recognizer not initialized")
     return RECOGNIZER
+
+
+def _warmup():
+    """One-time GPU warm-up to reduce first-partial latency."""
+    r = _need_recognizer()
+    s = r.create_stream()
+    s.accept_waveform(SAMPLE_RATE, np.zeros(SAMPLE_RATE * 2, dtype=np.float32))
+    while r.is_ready(s):
+        r.decode_stream(s)
+    r.reset(s)
+
+
+def _drain_ready_streams(deadline: float) -> None:
+    """Drain all ready frames across clients until no-one is ready or time budget used."""
+    r = _need_recognizer()
+    while time.perf_counter() < deadline:
+        progressed = False
+
+        # prioritize finalizing streams
+        hot  = [c.stream for c in CLIENTS.values() if (c.commit or c.ended) and r.is_ready(c.stream)]
+        cold = [c.stream for c in CLIENTS.values() if not (c.commit or c.ended) and r.is_ready(c.stream)]
+
+        for lst in (hot, cold):
+            if not lst:
+                continue
+            for i in range(0, len(lst), MAX_BATCH):
+                r.decode_streams(lst[i:i+MAX_BATCH])
+            progressed = True
+
+        if not progressed:
+            break
 
 
 @dataclass
@@ -143,53 +205,41 @@ def _is_conn_closed(ws) -> bool:
 
 async def decode_loop():
     while True:
-        await asyncio.sleep(0)
+        await asyncio.sleep(LOOP_SLEEP)
 
-        # 1) decode all streams that are ready
-        ready = []
-        for c in list(CLIENTS.values()):
-            try:
-                if _need_recognizer().is_ready(c.stream):
-                    ready.append(c)
-            except Exception:
-                continue
+        # 1) Drain regular decoding up to our time budget
+        deadline = time.perf_counter() + (DRAIN_BUDGET_MS / 1000.0)
+        _drain_ready_streams(deadline)
 
-        # multi-stream pass
-        for i in range(0, len(ready), MAX_BATCH):
-            part = ready[i : i + MAX_BATCH]
-            if part:
-                _need_recognizer().decode_streams([c.stream for c in part])
-                # optional: drain each stream a bit more for snappier partials
-                for c in part:
-                    while _need_recognizer().is_ready(c.stream):
-                        _need_recognizer().decode_stream(c.stream)
-
-        # 2) emit partials at EMIT_INTERVAL
+        # 2) Emit partials/finals
         now = time.perf_counter()
-        for c in list(CLIENTS.values()):
+        recog = _need_recognizer()
+        for cid, c in list(CLIENTS.items()):
             try:
+                # partials
                 if (now - c.last_emit_ts) >= EMIT_INTERVAL:
-                    text = _need_recognizer().get_result(c.stream).strip()
+                    text = recog.get_result(c.stream).strip()
                     if text and text != c.last_partial:
                         await safe_send(c.ws, {"type": "partial", "text": text})
                         c.last_partial = text
-                        c.last_emit_ts = now
+                    c.last_emit_ts = now
 
-                # 3) Client-driven finalization: SEG (segment) or EOS (end session)
+                # finalize on client signal - drain to completion (no time cap)
                 if c.commit or c.ended:
-                    # drain completely before finalizing
-                    while _need_recognizer().is_ready(c.stream):
-                        _need_recognizer().decode_stream(c.stream)
-                    final_text = _need_recognizer().get_result(c.stream).strip()
+                    # fully drain this stream: keep decoding while it's ready
+                    while recog.is_ready(c.stream):
+                        recog.decode_stream(c.stream)
+                    final_text = recog.get_result(c.stream).strip()
                     await safe_send(c.ws, {"type": "final", "text": final_text})
-                    _need_recognizer().reset(c.stream)
-                    c.commit = False  # reset commit flag for next segment
+                    recog.reset(c.stream)
+                    c.commit = False
                     if c.ended:
-                        c.done = True  # only mark done if EOS, not SEG
+                        c.done = True
             except Exception:
                 traceback.print_exc()
                 c.done = True
 
+        # 3) cleanup closed
         to_close = [cid for cid, c in CLIENTS.items() if c.done or _is_conn_closed(c.ws)]
         for cid in to_close:
             try:
@@ -258,21 +308,43 @@ async def handle_ws(ws: websockets.server.WebSocketServerProtocol):
 async def main():
     global RECOGNIZER
     
+    # Runtime diagnostics - prove what's actually loaded
+    LOG.info("🔍 Runtime Diagnostics:")
+    LOG.info("sherpa_onnx=%s  file=%s", so.__version__, so.__file__)
+    
+    # Show ORT library candidates
+    root = os.path.dirname(so.__file__)
+    ort_libs = glob.glob(os.path.join(root, "**/libonnxruntime.*"), recursive=True)
+    LOG.info("libonnxruntime candidates: %s", ort_libs)
+    
+    # CUDA environment
+    LOG.info("CUDA_VISIBLE_DEVICES=%s", os.environ.get("CUDA_VISIBLE_DEVICES", "not set"))
+    LOG.info("NVIDIA_VISIBLE_DEVICES=%s", os.environ.get("NVIDIA_VISIBLE_DEVICES", "not set"))
+    
+    # ORT logging settings
+    LOG.info("ORT_LOG_SEVERITY_LEVEL=%s ORT_LOG_VERBOSITY_LEVEL=%s SHERPA_ONNX_LOG=%s", 
+             os.environ.get("ORT_LOG_SEVERITY_LEVEL"), 
+             os.environ.get("ORT_LOG_VERBOSITY_LEVEL"),
+             os.environ.get("SHERPA_ONNX_LOG"))
+    
     # Preflight logging - show configuration before attempting to load
     LOG.info("ASR_DIR=%s PROVIDER=%s SAMPLE_RATE=%s", ASR_DIR, PROVIDER, SAMPLE_RATE)
-    LOG.info("EMIT_INTERVAL=%.3f MAX_BATCH=%d", EMIT_INTERVAL, MAX_BATCH)
+    LOG.info("EMIT_INTERVAL=%.3f (PARTIAL_HZ=%.1f) MAX_BATCH=%d", EMIT_INTERVAL, PARTIAL_HZ, MAX_BATCH)
+    LOG.info("DRAIN_BUDGET_MS=%.1f (optimized for throughput)", DRAIN_BUDGET_MS)
     LOG.info("MAX_CONNECTIONS=%d HOST=%s PORT=%s", MAX_CONNECTIONS, HOST, PORT)
     LOG.info("Endpoint rules: RULE1=%dms RULE2=%dms RULE3_MIN_UTT=%dms", 
              ENDPOINT_RULE1_MS, ENDPOINT_RULE2_MS, ENDPOINT_RULE3_MIN_UTT_MS)
     
     try:
-        # Debug: show what this wheel exports (helps future upgrades)
-        names = [n for n in dir(so) if "Config" in n or "Recognizer" in n or "Stream" in n]
-        LOG.info("sherpa_onnx %s exports: %s", getattr(so, "__version__", "?"), names)
-        
         LOG.info("Loading ASR model...")
+        if PROVIDER == "cuda":
+            LOG.info("🔍 Watch for 'CUDAExecutionProvider' in ORT logs below to confirm GPU usage...")
         RECOGNIZER = _load_asr()
         LOG.info("✅ Zipformer loaded (provider=%s) from %s", PROVIDER, ASR_DIR)
+        
+        LOG.info("Warming up GPU...")
+        _warmup()
+        LOG.info("✅ GPU warmup complete")
     except Exception:
         LOG.exception("FATAL: failed to load recognizer")
         # Keep container alive so logs are visible
@@ -287,8 +359,8 @@ async def main():
         host=HOST,
         port=PORT,
         max_size=2**23,
-        ping_interval=20.0,
-        ping_timeout=20.0,
+        ping_interval=None,   # disable keepalive for local testing
+        ping_timeout=None,
         compression=None,
         max_queue=1024,
     ):
