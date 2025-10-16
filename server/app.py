@@ -47,47 +47,74 @@ PORT = int(os.getenv("WS_PORT", "8000"))
 PROVIDER = os.getenv("PROVIDER", "cuda")  # "cuda" or "cpu"
 MAX_BATCH = max(1, int(os.getenv("MAX_BATCH", "64")))
 MAX_CONNECTIONS = int(os.getenv("MAX_CONNECTIONS", "2048"))
-PARTIAL_HZ = float(os.getenv("PARTIAL_HZ", "30"))  # partials per second per client (increased for snappier partials)
+PARTIAL_HZ = float(os.getenv("PARTIAL_HZ", "60"))  # partials per second per client (increased for snappier partials)
 EMIT_INTERVAL = 1.0 / max(1.0, PARTIAL_HZ)
 
 # Decode scheduling knobs (optimized for throughput)
-DRAIN_BUDGET_MS = float(os.getenv("DRAIN_BUDGET_MS", "80"))  # start generous
-LOOP_SLEEP = 0.001  # 1 ms
+DRAIN_BUDGET_MS = float(os.getenv("DRAIN_BUDGET_MS", "200"))  # generous for single-stream baseline
+LOOP_SLEEP = float(os.getenv("LOOP_SLEEP", "0.0005"))
+
+# Micro-batching knobs
+MAX_WAIT_MS = float(os.getenv("MAX_WAIT_MS", "8"))          # tiny micro-batch window
+MIN_BATCH_BEFORE_WAIT = int(os.getenv("MIN_BATCH_BEFORE_WAIT", "4"))  # if we already have 4+, don't wait
 
 # Endpointing (aggressive for low latency)
 ENDPOINT_RULE1_MS = int(os.getenv("ENDPOINT_RULE1_MS", "800"))
 ENDPOINT_RULE2_MS = int(os.getenv("ENDPOINT_RULE2_MS", "400"))
 ENDPOINT_RULE3_MIN_UTT_MS = int(os.getenv("ENDPOINT_RULE3_MIN_UTT_MS", "800"))
 
+# Decoding method options
+DECODING_METHOD = os.getenv("DECODING_METHOD", "greedy_search")  # or "modified_beam_search"
+MAX_ACTIVE_PATHS = int(os.getenv("MAX_ACTIVE_PATHS", "8"))  # for beam search
+
 ASR_DIR = Path(os.getenv("ASR_DIR", ""))
 
 
-def _pick_variant(dir_: Path, prefix: str, prefer_int8: bool) -> str:
-    """Return a model file path under dir_ with the given prefix, preferring fp32 on CUDA."""
-    files = sorted(p for p in dir_.glob(f"{prefix}*.onnx"))
+def _require_chunked(dir_: Path):
+    """Fail fast if ASR_DIR lacks chunked streaming exports."""
+    needed = ["encoder", "decoder", "joiner"]
+    for role in needed:
+        if not any("chunk" in p.name for p in dir_.glob(f"{role}*.onnx")):
+            raise RuntimeError(
+                f"{dir_} has no chunked {role}*.onnx. "
+                "Use 2023-06-26 or re-export 2023-06-21 as chunked."
+            )
+
+
+def _pick_chunked(dir_: Path, role: str) -> str:
+    """Pick the best chunked ONNX model file."""
+    files = list(dir_.glob(f"{role}-epoch-99-avg-1-chunk-*.onnx"))
+    
     if not files:
-        raise FileNotFoundError(f"Missing {prefix}*.onnx in {dir_}")
-    # separate int8 and non-int8
-    int8 = [p for p in files if ".int8." in p.name]
-    f32  = [p for p in files if ".int8." not in p.name]
-    # also prefer "chunk" variants within each bucket
-    def score(p: Path) -> tuple[int, str]:
-        # (0 => has 'chunk' => preferred first), then lexicographic
-        return (0 if "chunk" in p.name else 1, p.name)
-    if prefer_int8 and int8:
-        return str(sorted(int8, key=score)[0])
-    if f32:
-        return str(sorted(f32, key=score)[0])
-    # fallback if only int8 exists
-    return str(sorted(int8, key=score)[0])
+        raise RuntimeError(f"{dir_}: missing chunked {role}*.onnx; use the 2023-06-26 pack.")
+    
+    # Prefer left-128 fp32 on GPU, then left-64, then other chunks
+    # Sort by: (is_int8, not_left_128, not_left_64, name)
+    def score(p: Path) -> tuple[int, int, int, str]:
+        name = p.name
+        is_int8 = 1 if ".int8." in name else 0
+        not_left_128 = 0 if "left-128" in name else 1
+        not_left_64 = 0 if "left-64" in name else 1
+        return (is_int8, not_left_128, not_left_64, name)
+    
+    files.sort(key=score)
+    pick = files[0]
+    LOG.info("using %s=%s", role, pick.name)
+    return str(pick)
 
 
 def _load_asr() -> so.OnlineRecognizer:
     """Load ASR model using the canonical sherpa-onnx public API (factory method)."""
-    enc = _pick_variant(ASR_DIR, "encoder", prefer_int8=(PROVIDER != "cuda"))
-    dec = _pick_variant(ASR_DIR, "decoder", prefer_int8=(PROVIDER != "cuda"))
-    joi = _pick_variant(ASR_DIR, "joiner",  prefer_int8=(PROVIDER != "cuda"))
+    # Ensure we have chunked streaming exports
+    _require_chunked(ASR_DIR)
+    
+    # Pick the best chunked models
+    enc = _pick_chunked(ASR_DIR, "encoder")
+    dec = _pick_chunked(ASR_DIR, "decoder")
+    joi = _pick_chunked(ASR_DIR, "joiner")
     tok = str(ASR_DIR / "tokens.txt")
+
+    NUM_THREADS = int(os.getenv("NUM_THREADS", "6"))  # good start for 28 vCPUs
 
     # sherpa-onnx canonical public API (works in 1.12.13 and 1.12.14):
     try:
@@ -97,7 +124,7 @@ def _load_asr() -> so.OnlineRecognizer:
             decoder=dec,
             joiner=joi,
             # runtime / features
-            num_threads=int(os.getenv("NUM_THREADS", "2")),  # see §3
+            num_threads=NUM_THREADS,
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
             # endpointing (seconds) - disabled for client-driven control
@@ -106,8 +133,8 @@ def _load_asr() -> so.OnlineRecognizer:
             rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
             rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
             # decoding
-            decoding_method="greedy_search",
-            max_active_paths=4,
+            decoding_method=DECODING_METHOD,
+            max_active_paths=MAX_ACTIVE_PATHS,
             # provider
             provider=("cuda" if PROVIDER == "cuda" else "cpu"),
             device=0
@@ -117,6 +144,7 @@ def _load_asr() -> so.OnlineRecognizer:
         if PROVIDER == "cuda":
             LOG.info("✅ CUDA provider successfully initialized")
         
+        LOG.info("num_threads(features)=%d", NUM_THREADS)
         return recognizer
         
     except Exception as e:
@@ -146,25 +174,44 @@ def _warmup():
     r.reset(s)
 
 
-def _drain_ready_streams(deadline: float) -> None:
-    """Drain all ready frames across clients until no-one is ready or time budget used."""
-    r = _need_recognizer()
-    while time.perf_counter() < deadline:
-        progressed = False
+async def _decode_group_with_micro_wait(recog, clients, budget_deadline: float) -> bool:
+    """
+    Decode 'clients' whose streams are ready. If too few are ready, wait up to MAX_WAIT_MS
+    (bounded by remaining budget) to accumulate a larger batch. Returns True if any progress.
+    """
+    if not clients:
+        return False
 
-        # prioritize finalizing streams
-        hot  = [c.stream for c in CLIENTS.values() if (c.commit or c.ended) and r.is_ready(c.stream)]
-        cold = [c.stream for c in CLIENTS.values() if not (c.commit or c.ended) and r.is_ready(c.stream)]
+    def ready_streams():
+        return [c.stream for c in clients if recog.is_ready(c.stream)]
 
-        for lst in (hot, cold):
-            if not lst:
-                continue
-            for i in range(0, len(lst), MAX_BATCH):
-                r.decode_streams(lst[i:i+MAX_BATCH])
-            progressed = True
+    ready = ready_streams()
+    if not ready:
+        return False
 
-        if not progressed:
-            break
+    # If batch is small, briefly wait for more (but never exceed loop budget)
+    if len(ready) < MIN_BATCH_BEFORE_WAIT and MAX_WAIT_MS > 0.0:
+        # how much time left in the outer budget?
+        left_ms = max(0.0, (budget_deadline - time.perf_counter()) * 1000.0)
+        wait_ms = min(MAX_WAIT_MS, left_ms)
+        t_end = time.perf_counter() + wait_ms / 1000.0
+        while time.perf_counter() < t_end:
+            await asyncio.sleep(0)  # yield so other tasks can feed audio
+            r2 = ready_streams()
+            if len(r2) >= MIN_BATCH_BEFORE_WAIT or len(r2) >= MAX_BATCH:
+                ready = r2
+                break
+            ready = r2  # keep freshest view
+
+    # Batch in chunks of MAX_BATCH
+    progressed = False
+    for i in range(0, len(ready), MAX_BATCH):
+        batch = ready[i:i+MAX_BATCH]
+        if not batch:
+            continue
+        recog.decode_streams(batch)
+        progressed = True
+    return progressed
 
 
 @dataclass
@@ -207,16 +254,30 @@ async def decode_loop():
     while True:
         await asyncio.sleep(LOOP_SLEEP)
 
-        # 1) Drain regular decoding up to our time budget
-        deadline = time.perf_counter() + (DRAIN_BUDGET_MS / 1000.0)
-        _drain_ready_streams(deadline)
-
-        # 2) Emit partials/finals
-        now = time.perf_counter()
         recog = _need_recognizer()
+
+        # 1) Drain decoding within time budget, prioritizing finalizing ('hot') streams
+        budget_deadline = time.perf_counter() + (DRAIN_BUDGET_MS / 1000.0)
+        while time.perf_counter() < budget_deadline:
+            # split into hot/cold each iteration so priority is fresh
+            hot_clients  = [c for c in CLIENTS.values() if (c.commit or c.ended)]
+            cold_clients = [c for c in CLIENTS.values() if not (c.commit or c.ended)]
+
+            progressed = False
+            # Hot first: let finals/commits jump the queue
+            if await _decode_group_with_micro_wait(recog, hot_clients, budget_deadline):
+                progressed = True
+            if await _decode_group_with_micro_wait(recog, cold_clients, budget_deadline):
+                progressed = True
+
+            if not progressed:
+                break
+
+        # 2) Emit partials + handle finals
+        now = time.perf_counter()
         for cid, c in list(CLIENTS.items()):
             try:
-                # partials
+                # Partials
                 if (now - c.last_emit_ts) >= EMIT_INTERVAL:
                     text = recog.get_result(c.stream).strip()
                     if text and text != c.last_partial:
@@ -224,9 +285,8 @@ async def decode_loop():
                         c.last_partial = text
                     c.last_emit_ts = now
 
-                # finalize on client signal - drain to completion (no time cap)
+                # Finals: EOS/SEG => drain to completion (NO time cap)
                 if c.commit or c.ended:
-                    # fully drain this stream: keep decoding while it's ready
                     while recog.is_ready(c.stream):
                         recog.decode_stream(c.stream)
                     final_text = recog.get_result(c.stream).strip()
@@ -235,11 +295,12 @@ async def decode_loop():
                     c.commit = False
                     if c.ended:
                         c.done = True
+
             except Exception:
                 traceback.print_exc()
                 c.done = True
 
-        # 3) cleanup closed
+        # 3) Cleanup
         to_close = [cid for cid, c in CLIENTS.items() if c.done or _is_conn_closed(c.ws)]
         for cid in to_close:
             try:
@@ -332,6 +393,7 @@ async def main():
     LOG.info("EMIT_INTERVAL=%.3f (PARTIAL_HZ=%.1f) MAX_BATCH=%d", EMIT_INTERVAL, PARTIAL_HZ, MAX_BATCH)
     LOG.info("DRAIN_BUDGET_MS=%.1f (optimized for throughput)", DRAIN_BUDGET_MS)
     LOG.info("MAX_CONNECTIONS=%d HOST=%s PORT=%s", MAX_CONNECTIONS, HOST, PORT)
+    LOG.info("Decoding: method=%s max_active_paths=%d", DECODING_METHOD, MAX_ACTIVE_PATHS)
     LOG.info("Endpoint rules: RULE1=%dms RULE2=%dms RULE3_MIN_UTT=%dms", 
              ENDPOINT_RULE1_MS, ENDPOINT_RULE2_MS, ENDPOINT_RULE3_MIN_UTT_MS)
     

@@ -31,9 +31,12 @@ RUN python -m pip install --upgrade pip && \
 
 # Models
 RUN mkdir -p /models/asr
-# ASR: Streaming Zipformer (English)
+# ASR: Streaming Zipformer (English, chunked streaming export)
+# CRITICAL: This is the 2023-06-26 pack that includes chunked exports like:
+#   encoder-epoch-99-avg-1-chunk-{16,32}-left-{64,128}.onnx (fp32 + int8)
+# The 2023-06-21 pack lacks these chunked files and won't achieve real-time performance.
 RUN curl -L -o /models/asr/model.tar.bz2 \
-      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2 \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2 \
  && tar -C /models/asr -xjf /models/asr/model.tar.bz2 \
  && rm /models/asr/model.tar.bz2 \
  && echo "=== Model files extracted ===" \
@@ -53,10 +56,12 @@ ENV WS_HOST=0.0.0.0 \
     MAX_BATCH=64 \
     MAX_CONNECTIONS=2048 \
     PARTIAL_HZ=20 \
+    DECODING_METHOD=greedy_search \
+    MAX_ACTIVE_PATHS=8 \
     ENDPOINT_RULE1_MS=800 \
     ENDPOINT_RULE2_MS=400 \
     ENDPOINT_RULE3_MIN_UTT_MS=800 \
-    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21
+    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26
 
 
 EXPOSE 8000

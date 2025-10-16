@@ -3,10 +3,23 @@
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What's inside
-- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-21` (the one from 2023-06-26 has worse performance, especialy wrt filler words)
+- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26` 
 - **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
 - Uses **factory method API** (`OnlineRecognizer.from_transducer()`) - the stable public interface
 - Batched decode across ready streams for high throughput (L40S-ready)
+- **Enforces chunked streaming exports** for optimal real-time performance
+
+## Model Quality vs Performance Trade-off
+
+**Current default (2023-06-26):**
+- **Pros:** Has chunked streaming exports, achieves real-time performance (RTF < 0.5)
+- **Cons:** Lower transcription quality, especially with filler words and disfluencies
+
+**Alternative (2023-06-21):**  
+- **Pros:** Higher transcription quality, better handling of natural speech
+- **Cons:** No chunked streaming exports, poor real-time performance (RTF > 1.0)
+
+The server will **fail fast** if you try to use a model pack without chunked streaming exports. If you need the higher quality from 2023-06-21, you must re-export it with chunked streaming enabled using the included export script.
 
 ## Breaking Changes in sherpa-onnx 1.12.13+
 
@@ -41,11 +54,18 @@ recognizer = sherpa_onnx.OnlineRecognizer(config)
 # Build
 docker build -t sherpa-asr:gpu -f docker/Dockerfile .
 
-# Run (all GPUs). Pin with CUDA_VISIBLE_DEVICES if needed.
+# Run (all GPUs) - fastest decoding
 docker run --rm --gpus all -p 8000:8000 \
   -e PROVIDER=cuda \
   -e MAX_BATCH=64 \
   -e PARTIAL_HZ=20 \
+  --name sherpa-asr sherpa-asr:gpu
+
+# Run with better quality (slower but improved transcription)
+docker run --rm --gpus all -p 8000:8000 \
+  -e PROVIDER=cuda \
+  -e DECODING_METHOD=modified_beam_search \
+  -e MAX_ACTIVE_PATHS=8 \
   --name sherpa-asr sherpa-asr:gpu
 ```
 
@@ -63,14 +83,15 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `WS_PORT` (default `8000`)
 - `SAMPLE_RATE` (default `16000`)
 - `PROVIDER` (`cuda` or `cpu`, default `cuda`)
-- `NUM_THREADS` (ONNX Runtime threads, default `2`)
+- `NUM_THREADS` (ONNX Runtime threads, default `6`)
 - `MAX_BATCH` (default `64`)
 - `MAX_CONNECTIONS` (default `2048`)
 - `PARTIAL_HZ` (partials per second per client; default `20`)
-- `DECODE_BUDGET_MS` (regular decode time budget per loop; default `20`)
-- `FINALIZE_DRAIN_MS` (budget for fully draining finalizing streams; default `100`)
+- `DECODING_METHOD` (`greedy_search` or `modified_beam_search`, default `greedy_search`)
+- `MAX_ACTIVE_PATHS` (beam search width, default `8`)
+- `DRAIN_BUDGET_MS` (decode time budget per loop; default `200`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
-- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`)
+- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26`)
 
 ## Included models
 The container downloads and unpacks the ASR model at build time under `/models`.
@@ -126,11 +147,14 @@ If you see `OnlineRecognizer() takes no arguments` or missing config classes:
 3. **Avoid config objects:** They're internal and not exported in some wheel builds
 
 ### Common issues:
+- **"missing chunked *.onnx":** You're using a model pack without chunked streaming exports (like 2023-06-21). Use 2023-06-26 or re-export with chunked streaming enabled
+- **Poor real-time performance (RTF > 1.0):** Check logs for chunked file usage; should see "using encoder=...chunk..." in startup logs  
 - **"Please compile with -DSHERPA_ONNX_ENABLE_GPU=ON":** You're using PyPI sherpa-onnx (no GPU). Use the CUDA wheel instead: `sherpa-onnx==1.12.14+cuda12.cudnn9`
 - **`import onnxruntime` fails:** CUDA wheel bundles ORT natively - no Python `onnxruntime` module available (this is expected!)
 - **Import errors:** Make sure you're using the CUDA wheel, not mixing with `onnxruntime-gpu`
 - **CUDA out of memory:** Lower `MAX_BATCH` or use smaller models
 - **High latency:** Increase `PARTIAL_HZ`, tighten endpointing rules, or check GPU utilization
+- **Poor transcription quality:** Try `DECODING_METHOD=modified_beam_search` with `MAX_ACTIVE_PATHS=8`
 - **"Fallback to cpu!":** Check container logs and NVIDIA runtime with debugging commands above
 
 ## Why this stack
@@ -140,9 +164,11 @@ If you see `OnlineRecognizer() takes no arguments` or missing config classes:
 - **Async WebSocket server:** handles thousands of concurrent streams with batched GPU processing
 
 ## Notes & tuning
-- Lower latency: increase `PARTIAL_HZ` (e.g., 30–40) and/or tighten endpointing
-- Higher throughput: raise `MAX_BATCH` if GPU has headroom
-- CPU fallback: set `PROVIDER=cpu` (slower)
+- **Lower latency:** increase `PARTIAL_HZ` (e.g., 30–40) and/or tighten endpointing
+- **Higher throughput:** raise `MAX_BATCH` if GPU has headroom  
+- **Better quality:** use `DECODING_METHOD=modified_beam_search` with `MAX_ACTIVE_PATHS=8` (costs ~10% latency)
+- **CPU fallback:** set `PROVIDER=cpu` (much slower)
+- **Chunked streaming:** Server enforces chunked exports and will fail fast if missing
 
 ## Build & push to Docker Hub
 
