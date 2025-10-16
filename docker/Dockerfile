@@ -33,7 +33,7 @@ RUN python -m pip install --upgrade pip && \
 RUN mkdir -p /models/asr
 # ASR: Streaming Zipformer (English)
 RUN curl -L -o /models/asr/model.tar.bz2 \
-      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-26.tar.bz2 \
+      https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-en-2023-06-21.tar.bz2 \
  && tar -C /models/asr -xjf /models/asr/model.tar.bz2 \
  && rm /models/asr/model.tar.bz2 \
  && echo "=== Model files extracted ===" \
@@ -56,7 +56,7 @@ ENV WS_HOST=0.0.0.0 \
     ENDPOINT_RULE1_MS=800 \
     ENDPOINT_RULE2_MS=400 \
     ENDPOINT_RULE3_MIN_UTT_MS=800 \
-    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26
+    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21
 
 
 EXPOSE 8000

@@ -3,7 +3,7 @@
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What's inside
-- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26`
+- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-21`
 - **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
 - Uses **factory method API** (`OnlineRecognizer.from_transducer()`) - the stable public interface
 - Batched decode across ready streams for high throughput (L40S-ready)
@@ -68,7 +68,7 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `MAX_CONNECTIONS` (default `2048`)
 - `PARTIAL_HZ` (partials per second per client; default `20`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
-- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26`)
+- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`)
 
 ## Included models
 The container downloads and unpacks the ASR model at build time under `/models`.
