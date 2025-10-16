@@ -75,18 +75,25 @@ The container downloads and unpacks the ASR model at build time under `/models`.
 
 ## Smoke tests (included clients)
 
+### From host machine (external):
 ```bash
-# Warm (sends fast to warm kernels)
-WS=ws://127.0.0.1:8000/ws python tests/warmup.py --file samples/mid.wav --rtf 10 --print-partials
-
-# Single-file smoke
-WS=ws://127.0.0.1:8000/ws python tests/client.py --file samples/mid.wav --print-partials --full-text
-
-# Concurrency bench (synthetic tone)
-WS=ws://127.0.0.1:8000/ws python tests/bench.py --streams 64 --duration 30 --frame-ms 20 --rtf 1.0
+WS=ws://127.0.0.1:8000/ws python3 tests/client.py --file samples/mid.wav --print-partials --full-text
 ```
 
-The `samples/` directory is copied into the image and available at `/app/samples`.
+### From inside container:
+```bash
+# Warmup test (fast send to warm GPU kernels)
+python3 tests/warmup.py --file mid.wav --rtf 1.0 --full-text
+
+# Concurrency benchmark (synthetic audio)
+python3 tests/bench.py --streams 64 --duration 30 --frame-ms 20 --rtf 1.0 --print-partials
+
+# Test different files
+python3 tests/warmup.py --file realistic.mp3 --rtf 1.0 --print-partials --full-text
+python3 tests/warmup.py --file long-noisy.mp3 --rtf 2.0 --full-text
+```
+
+The `samples/` and `tests/` directories are copied into the image and available at `/app/samples` and `/app/tests`.
 
 ## Troubleshooting
 
