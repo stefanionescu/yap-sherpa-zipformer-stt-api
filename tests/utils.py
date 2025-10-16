@@ -14,7 +14,8 @@ import websockets
 
 SAMPLE_RATE = 16_000
 CONTROL_PREFIX = b"__CTRL__:"
-CTRL_EOS = b"EOS"
+CTRL_SEG = b"SEG"  # commit current segment, keep connection open
+CTRL_EOS = b"EOS"  # finalize segment and end session
 SAMPLES_DIR = Path(__file__).resolve().parent.parent / "samples"
 
 
@@ -146,8 +147,11 @@ async def stream_session(
             done_event.set()
 
         await asyncio.gather(sender(), receiver())
-        if not ws.closed:
-            await ws.close()
+        # Compatible with websockets 12 ClientConnection
+        if getattr(ws, "close_code", None) is None:
+            state = getattr(ws, "state", None)
+            if not (getattr(state, "name", "") in {"CLOSING", "CLOSED"}):
+                await ws.close()
 
     end_ts = final_ts or time.perf_counter()
     audio_s = len(audio) / SAMPLE_RATE

@@ -31,7 +31,8 @@ LOG = logging.getLogger("sherpa-asr")
 
 # ---- Protocol constants (match bench/client) ----
 CONTROL_PREFIX = b"__CTRL__:"
-CTRL_EOS = b"EOS"
+CTRL_SEG = b"SEG"  # commit current segment, keep connection open
+CTRL_EOS = b"EOS"  # finalize segment and end session
 SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
 
 # ---- Runtime tuning ----
@@ -77,8 +78,8 @@ def _load_asr() -> so.OnlineRecognizer:
         num_threads=max(1, int(os.getenv("NUM_THREADS", "2"))),
         sample_rate=SAMPLE_RATE,
         feature_dim=80,
-        # endpointing (seconds)
-        enable_endpoint_detection=True,
+        # endpointing (seconds) - disabled for client-driven control
+        enable_endpoint_detection=False,   # client controls end via EOS
         rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
         rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
         rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
@@ -111,6 +112,7 @@ class Client:
     last_partial: str = ""
     last_emit_ts: float = field(default_factory=time.perf_counter)
     ended: bool = False
+    commit: bool = False
     done: bool = False
 
 
@@ -125,10 +127,26 @@ def _next_id() -> int:
     return _CLIENT_SEQ
 
 
+def _is_conn_closed(ws) -> bool:
+    """Check if websocket connection is closed (compatible with websockets 12).
+    
+    websockets 12 ServerConnection has no `.closed` property.
+    Close is observable via close_code or state.
+    """
+    cc = getattr(ws, "close_code", None)
+    if cc is not None:
+        return True
+    state = getattr(ws, "state", None)  # enum in websockets 12
+    name = getattr(state, "name", "")
+    return name in {"CLOSING", "CLOSED"}
+
+
 async def decode_loop():
     while True:
         await asyncio.sleep(0)
-        ready: List[Client] = []
+
+        # 1) decode all streams that are ready
+        ready = []
         for c in list(CLIENTS.values()):
             try:
                 if _need_recognizer().is_ready(c.stream):
@@ -136,34 +154,43 @@ async def decode_loop():
             except Exception:
                 continue
 
+        # multi-stream pass
         for i in range(0, len(ready), MAX_BATCH):
             part = ready[i : i + MAX_BATCH]
             if part:
                 _need_recognizer().decode_streams([c.stream for c in part])
+                # optional: drain each stream a bit more for snappier partials
+                for c in part:
+                    while _need_recognizer().is_ready(c.stream):
+                        _need_recognizer().decode_stream(c.stream)
 
+        # 2) emit partials at EMIT_INTERVAL
         now = time.perf_counter()
         for c in list(CLIENTS.values()):
             try:
                 if (now - c.last_emit_ts) >= EMIT_INTERVAL:
-                    res = _need_recognizer().get_result(c.stream)
-                    text = (res.text or "").strip()
+                    text = _need_recognizer().get_result(c.stream).strip()
                     if text and text != c.last_partial:
                         await safe_send(c.ws, {"type": "partial", "text": text})
                         c.last_partial = text
                         c.last_emit_ts = now
 
-                if _need_recognizer().is_endpoint(c.stream) or (c.ended and not _need_recognizer().is_ready(c.stream)):
-                    final_res = _need_recognizer().get_result(c.stream)
-                    final_text = (final_res.text or "").strip()
+                # 3) Client-driven finalization: SEG (segment) or EOS (end session)
+                if c.commit or c.ended:
+                    # drain completely before finalizing
+                    while _need_recognizer().is_ready(c.stream):
+                        _need_recognizer().decode_stream(c.stream)
+                    final_text = _need_recognizer().get_result(c.stream).strip()
                     await safe_send(c.ws, {"type": "final", "text": final_text})
-                    if c.ended:
-                        c.done = True
                     _need_recognizer().reset(c.stream)
+                    c.commit = False  # reset commit flag for next segment
+                    if c.ended:
+                        c.done = True  # only mark done if EOS, not SEG
             except Exception:
                 traceback.print_exc()
                 c.done = True
 
-        to_close = [cid for cid, c in CLIENTS.items() if c.done or c.ws.closed]
+        to_close = [cid for cid, c in CLIENTS.items() if c.done or _is_conn_closed(c.ws)]
         for cid in to_close:
             try:
                 CLIENTS[cid].stream = None  # type: ignore
@@ -172,7 +199,11 @@ async def decode_loop():
 
 
 async def safe_send(ws: websockets.server.WebSocketServerProtocol, obj: dict):
-    if ws.closed:
+    # Compatible with websockets 12
+    if getattr(ws, "close_code", None) is not None:
+        return
+    state = getattr(ws, "state", None)
+    if getattr(state, "name", "") in {"CLOSING", "CLOSED"}:
         return
     try:
         await ws.send(json.dumps(obj, ensure_ascii=False))
@@ -195,16 +226,24 @@ async def handle_ws(ws: websockets.server.WebSocketServerProtocol):
                 b = bytes(msg)
                 if b.startswith(CONTROL_PREFIX):
                     ctrl = b[len(CONTROL_PREFIX) :]
-                    if ctrl == CTRL_EOS:
-                        CLIENTS[cid].ended = True
-                        CLIENTS[cid].stream.input_finished()
+                    if ctrl == CTRL_SEG:
+                        # Check if client still exists (might be removed by decode_loop)
+                        if cid in CLIENTS:
+                            CLIENTS[cid].commit = True
+                    elif ctrl == CTRL_EOS:
+                        # Check if client still exists (might be removed by decode_loop)
+                        if cid in CLIENTS:
+                            CLIENTS[cid].ended = True
+                            CLIENTS[cid].stream.input_finished()
                     continue
                 if len(b) % 2 != 0:
                     b = b[: len(b) - 1]
                 if not b:
                     continue
                 pcm = np.frombuffer(b, dtype="<i2").astype(np.float32) / 32768.0
-                CLIENTS[cid].stream.accept_waveform(SAMPLE_RATE, pcm)
+                # Check if client still exists (might be removed by decode_loop)
+                if cid in CLIENTS:
+                    CLIENTS[cid].stream.accept_waveform(SAMPLE_RATE, pcm)
             else:
                 continue
     except websockets.exceptions.ConnectionClosed:
