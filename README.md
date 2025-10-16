@@ -5,7 +5,7 @@ GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU
 ## What's inside
 - Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26` 
 - **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
-- Uses **factory method API** (`OnlineRecognizer.from_transducer()`) - the stable public interface
+- Uses **factory method API** (`OnlineRecognizer.from_transducer()`), the stable public interface
 - Batched decode across ready streams for high throughput (L40S-ready)
 - **Enforces chunked streaming exports** for optimal real-time performance
 
