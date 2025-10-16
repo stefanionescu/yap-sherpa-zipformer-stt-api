@@ -61,75 +61,37 @@ def _pick_one(dir_: Path, prefix: str) -> str:
 
 
 def _load_asr() -> so.OnlineRecognizer:
-    """Load ASR model using sherpa-onnx v1.12.14 OnlineRecognizer pattern."""
+    """Load ASR model using the canonical sherpa-onnx public API (factory method)."""
     enc = _pick_one(ASR_DIR, "encoder")
     dec = _pick_one(ASR_DIR, "decoder")
     joi = _pick_one(ASR_DIR, "joiner")
     tok = str(ASR_DIR / "tokens.txt")
 
-    # 1. Feature Extractor Config
-    feat_config = so.FeatureExtractorConfig(
-        sampling_rate=SAMPLE_RATE,
-        feature_dim=80
-    )
-
-    # 2. Transducer Model Config
-    transducer_cfg = so.OnlineTransducerModelConfig(
+    # sherpa-onnx canonical public API (works in 1.12.13 and 1.12.14):
+    return so.OnlineRecognizer.from_transducer(
+        tokens=tok,
         encoder=enc,
         decoder=dec,
-        joiner=joi
-    )
-
-    # 3. Provider Config for GPU/CPU
-    provider = PROVIDER if PROVIDER in ("cpu", "cuda") else "cpu"
-    provider_cfg = so.ProviderConfig(provider=provider, device=0)
-
-    # 4. Online Model Config with all required sub-configs
-    model_config = so.OnlineModelConfig(
-        transducer=transducer_cfg,
-        paraformer=so.OnlineParaformerModelConfig(),  # empty for unused model type
-        wenet_ctc=so.OnlineWenetCtcModelConfig(),     # empty for unused model type
-        zipformer2_ctc=so.OnlineZipformer2CtcModelConfig(),  # empty for unused model type
-        nemo_ctc=so.OnlineNeMoCtcModelConfig(),       # empty for unused model type
-        provider_config=provider_cfg,
-        tokens=tok,
-        num_threads=1,
-        warm_up=0,
-        debug=False,
-        model_type="",
-        modeling_unit="",
-        bpe_vocab=""
-    )
-
-    # 5. Endpoint Config
-    endpoint_config = so.EndpointConfig(
-        rule1=so.EndpointRule(False, ENDPOINT_RULE1_MS / 1000.0, 0.0),
-        rule2=so.EndpointRule(True, ENDPOINT_RULE2_MS / 1000.0, 0.0),
-        rule3=so.EndpointRule(False, 0.0, ENDPOINT_RULE3_MIN_UTT_MS / 1000.0),
-    )
-
-    # 6. Online Recognizer Config 
-    recognizer_config = so.OnlineRecognizerConfig(
-        feat_config=feat_config,
-        model_config=model_config,
-        lm_config=so.OnlineLMConfig(),  # no LM (use default)
-        endpoint_config=endpoint_config,
-        enable_endpoint=True,
+        joiner=joi,
+        # runtime / features
+        num_threads=max(1, int(os.getenv("NUM_THREADS", "2"))),
+        sample_rate=SAMPLE_RATE,
+        feature_dim=80,
+        # endpointing (seconds)
+        enable_endpoint_detection=True,
+        rule1_min_trailing_silence=ENDPOINT_RULE1_MS / 1000.0,
+        rule2_min_trailing_silence=ENDPOINT_RULE2_MS / 1000.0,
+        rule3_min_utterance_length=ENDPOINT_RULE3_MIN_UTT_MS / 1000.0,
+        # decoding
         decoding_method="greedy_search",
-        max_active_paths=4,  # for beam search (if using modified_beam_search)
-        hotwords_file="",
-        hotwords_score=0.0,  # 0 disables hotword boosting
-        blank_penalty=0.0,
-        temperature_scale=2.0,
-        rule_fsts="",
-        rule_fars="",
-        reset_encoder=False,
-        hr=so.HomophoneReplacerConfig()
+        max_active_paths=4,
+        # provider
+        provider=("cuda" if PROVIDER == "cuda" else "cpu"),
+        device=0,
+        # you can tune these if needed:
+        # cudnn_conv_algo_search=1,
+        # debug=False,
     )
-
-    # 7. Instantiate the OnlineRecognizer
-    recognizer = so.OnlineRecognizer(recognizer_config)
-    return recognizer
 
 
 RECOGNIZER: Optional[so.OnlineRecognizer] = None

@@ -21,10 +21,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3.10 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 
-# sherpa-onnx GPU wheel (CUDA 12 + cuDNN 9)
+# sherpa-onnx with ONNX Runtime GPU (CUDA 12 + cuDNN 9)
 RUN python -m pip install --upgrade pip && \
-    pip install 'sherpa-onnx==1.12.13+cuda12.cudnn9' \
-      -f https://k2-fsa.github.io/sherpa/onnx/cuda.html && \
+    pip install "onnxruntime-gpu>=1.20" && \
+    pip install "sherpa-onnx==1.12.14" && \
     pip install websockets uvloop numpy soundfile
 
 # Models
