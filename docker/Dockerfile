@@ -4,7 +4,7 @@ ARG BASE_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 
 # --- Stage 1: Export streaming ONNX (chunked) inside Docker ---
 # Use CUDA runtime and pip-install sherpa-onnx (pulls k2 deps) + CPU torch
-FROM ${BASE_IMAGE} as exporter
+FROM ${BASE_IMAGE} AS exporter
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
