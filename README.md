@@ -3,24 +3,14 @@
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What's inside
-- Streaming English Zipformer RNNT: exported at build time (chunked, `chunk=16`)
-- Output directory (inside image): `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`
-- **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
-- Uses **factory method API** (`OnlineRecognizer.from_transducer()`), the stable public interface
-- Batched decode across ready streams for high throughput (L40S-ready)
-- **Enforces chunked streaming exports** for optimal real-time performance
+- Custom Zipformer RNNT (S7, Libri+Giga) exported at build time as chunked streaming (`chunk_len=16`)
+- Output directory: `/models/asr/custom-s7-libri-giga-streaming-chunk16`
+- **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT)
+- Uses the stable public API `OnlineRecognizer.from_transducer()`
+- Batched GPU decoding for high throughput (L40S-ready)
 
-## Model Quality vs Performance Trade-off
-
-**Current default (2023-06-21):**
-- **Pros:** Higher transcription quality, better handling of natural speech
-- **Cons:** No chunked streaming exports, poor real-time performance (RTF > 1.0)
-
-**Alternative (2023-06-26):**
-- **Pros:** Has chunked streaming exports, achieves real-time performance (RTF < 0.5)
-- **Cons:** Lower transcription quality, especially with filler words and disfluencies
-
-The server will **fail fast** if you try to use a model pack without chunked streaming exports. This repo now performs the export **inside Docker during build** from the HF checkpoint `marcoyang/icefall-libri-giga-pruned-transducer-stateless7-streaming-2023-04-04` using Icefall's exporter (Zipformer S7, multi). The generated files include `encoder-epoch-99-avg-1-chunk-16-left-128.onnx`, `decoder-...`, `joiner-...`, and `tokens.txt`.
+## Model
+This image always uses a single, custom-exported model: S7 (Zipformer RNNT) trained on LibriSpeech+GigaSpeech, exported to ONNX with streaming chunking (`chunk_len=16`). The export happens during the Docker build using the Icefall exporter and Hugging Face checkpoint `marcoyang/icefall-libri-giga-pruned-transducer-stateless7-streaming-2023-04-04`. Files produced: `encoder-epoch-99-avg-1-chunk-16-left-128.onnx`, `decoder-...`, `joiner-...`, and `tokens.txt`.
 
 ## Breaking Changes in sherpa-onnx 1.12.13+
 
@@ -92,13 +82,10 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `MAX_ACTIVE_PATHS` (beam search width, default `8`)
 - `DRAIN_BUDGET_MS` (decode time budget per loop; default `200`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
-- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`)
+- `ASR_DIR` (default `/models/asr/custom-s7-libri-giga-streaming-chunk16`)
 
-## Included models
-During the Docker build a separate builder stage:
-- Clones the Icefall exporter and the HF checkpoint
-- Runs `export-onnx.py` with `--decode-chunk-len 16`
-- Produces chunked streaming ONNX files and copies them into `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`
+## Included model
+During the Docker build a separate builder stage clones the Icefall exporter and the HF checkpoint, runs `export-onnx.py` with `--decode-chunk-len 16`, and copies the outputs into `/models/asr/custom-s7-libri-giga-streaming-chunk16`.
 
 You can override `ASR_DIR` at runtime to point to a different model directory if you copy your own models into the container.
 
@@ -153,15 +140,11 @@ If you see `OnlineRecognizer() takes no arguments` or missing config classes:
 3. **Avoid config objects:** They're internal and not exported in some wheel builds
 
 ### Common issues:
-- **"missing chunked *.onnx":** You're using a model pack without chunked streaming exports (like 2023-06-21). Use 2023-06-21 or re-export with chunked streaming enabled
-- **Poor real-time performance (RTF > 1.0):** Check logs for chunked file usage; should see "using encoder=...chunk..." in startup logs  
-- **"Please compile with -DSHERPA_ONNX_ENABLE_GPU=ON":** You're using PyPI sherpa-onnx (no GPU). Use the CUDA wheel instead: `sherpa-onnx==1.12.14+cuda12.cudnn9`
-- **`import onnxruntime` fails:** CUDA wheel bundles ORT natively - no Python `onnxruntime` module available (this is expected!)
-- **Import errors:** Make sure you're using the CUDA wheel, not mixing with `onnxruntime-gpu`
-- **CUDA out of memory:** Lower `MAX_BATCH` or use smaller models
-- **High latency:** Increase `PARTIAL_HZ`, tighten endpointing rules, or check GPU utilization
-- **Poor transcription quality:** Try `DECODING_METHOD=modified_beam_search` with `MAX_ACTIVE_PATHS=8`
-- **"Fallback to cpu!":** Check container logs and NVIDIA runtime with debugging commands above
+- **Poor real-time performance (RTF > 1.0):** Check logs for chunked file usage; should see "using encoder=...chunk..." at startup. Ensure you run with `--gpus all` and `PROVIDER=cuda`.
+- **"Please compile with -DSHERPA_ONNX_ENABLE_GPU=ON":** You installed PyPI sherpa-onnx (CPU). Use the CUDA wheel: `sherpa-onnx==1.12.14+cuda12.cudnn9`.
+- **`import onnxruntime` fails:** CUDA wheel bundles ORT natively; no separate `onnxruntime` module needed (expected).
+- **CUDA out of memory:** Lower `MAX_BATCH` or use smaller models.
+- **High latency:** Increase `PARTIAL_HZ`, set `MAX_WAIT_MS=0`, tune `DRAIN_BUDGET_MS`.
 
 ## Why this stack
 - **Sherpa-ONNX Zipformer RNNT:** optimized for streaming; exposes `decode_streams()` for batch GPU decode  
@@ -205,5 +188,5 @@ bash docker/publish.sh
 
 ## Sources
 - **Sherpa-ONNX GPU install:** `https://k2-fsa.github.io/sherpa/onnx/python/install.html`
-- **Streaming Zipformer (EN):** `https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html#streaming-zipformer-en-2023-06-21`
-- **sherpa-onnx releases:** `https://github.com/k2-fsa/sherpa-onnx/releases`
+- **Icefall exporter:** `https://github.com/k2-fsa/icefall`
+- **HF checkpoint:** `https://huggingface.co/marcoyang/icefall-libri-giga-pruned-transducer-stateless7-streaming-2023-04-04`

@@ -58,7 +58,7 @@ RUN python3 icefall-src/egs/librispeech/ASR/pruned_transducer_stateless7_streami
 
 # Collect outputs for the runtime image (robust to filename variations)
 RUN bash -lc 'set -euo pipefail; \
-    out=/out/sherpa-onnx-streaming-zipformer-en-2023-06-21; \
+    out=/out/custom-s7-libri-giga-streaming-chunk16; \
     mkdir -p "$out"; \
     echo "=== Search for exported ONNX files (recursive) ==="; \
     find . -maxdepth 5 -type f -name "*.onnx" -printf "%p\n" || true; \
@@ -111,7 +111,7 @@ RUN python -m pip install --upgrade pip && \
 
 # Models (exported in builder stage)
 RUN mkdir -p /models/asr
-COPY --from=exporter /out/sherpa-onnx-streaming-zipformer-en-2023-06-21 /models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21
+COPY --from=exporter /out/custom-s7-libri-giga-streaming-chunk16 /models/asr/custom-s7-libri-giga-streaming-chunk16
 RUN echo "=== Exported model files ===" && \
     find /models/asr -maxdepth 2 -type f -printf '%P\n' | sort
 
@@ -134,7 +134,7 @@ ENV WS_HOST=0.0.0.0 \
     ENDPOINT_RULE1_MS=800 \
     ENDPOINT_RULE2_MS=400 \
     ENDPOINT_RULE3_MIN_UTT_MS=800 \
-    ASR_DIR=/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21
+    ASR_DIR=/models/asr/custom-s7-libri-giga-streaming-chunk16
 
 
 EXPOSE 8000
