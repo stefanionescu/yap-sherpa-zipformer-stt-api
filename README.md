@@ -3,7 +3,8 @@
 GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU decoding. A single WebSocket endpoint accepts `s16le` 16 kHz mono frames and returns JSON partial/final messages.
 
 ## What's inside
-- Streaming English Zipformer RNNT: `sherpa-onnx-streaming-zipformer-en-2023-06-26` 
+- Streaming English Zipformer RNNT: exported at build time (chunked, `chunk=16`)
+- Output directory (inside image): `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`
 - **sherpa-onnx 1.12.14+cuda12.cudnn9** (CUDA-enabled wheel with bundled ORT) for GPU support
 - Uses **factory method API** (`OnlineRecognizer.from_transducer()`), the stable public interface
 - Batched decode across ready streams for high throughput (L40S-ready)
@@ -11,15 +12,15 @@ GPU streaming ASR based on Sherpa-ONNX Zipformer RNNT (English) with batched GPU
 
 ## Model Quality vs Performance Trade-off
 
-**Current default (2023-06-26):**
-- **Pros:** Has chunked streaming exports, achieves real-time performance (RTF < 0.5)
-- **Cons:** Lower transcription quality, especially with filler words and disfluencies
-
-**Alternative (2023-06-21):**  
+**Current default (2023-06-21):**
 - **Pros:** Higher transcription quality, better handling of natural speech
 - **Cons:** No chunked streaming exports, poor real-time performance (RTF > 1.0)
 
-The server will **fail fast** if you try to use a model pack without chunked streaming exports. If you need the higher quality from 2023-06-21, you must re-export it with chunked streaming enabled using the included export script.
+**Alternative (2023-06-26):**
+- **Pros:** Has chunked streaming exports, achieves real-time performance (RTF < 0.5)
+- **Cons:** Lower transcription quality, especially with filler words and disfluencies
+
+The server will **fail fast** if you try to use a model pack without chunked streaming exports. This repo now performs the export **inside Docker during build** from the HF checkpoint `marcoyang/icefall-libri-giga-pruned-transducer-stateless7-streaming-2023-04-04` using Icefall's exporter (Zipformer S7, multi). The generated files include `encoder-epoch-99-avg-1-chunk-16-left-128.onnx`, `decoder-...`, `joiner-...`, and `tokens.txt`.
 
 ## Breaking Changes in sherpa-onnx 1.12.13+
 
@@ -91,10 +92,15 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `MAX_ACTIVE_PATHS` (beam search width, default `8`)
 - `DRAIN_BUDGET_MS` (decode time budget per loop; default `200`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
-- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-26`)
+- `ASR_DIR` (default `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`)
 
 ## Included models
-The container downloads and unpacks the ASR model at build time under `/models`.
+During the Docker build a separate builder stage:
+- Clones the Icefall exporter and the HF checkpoint
+- Runs `export-onnx.py` with `--decode-chunk-len 16`
+- Produces chunked streaming ONNX files and copies them into `/models/asr/sherpa-onnx-streaming-zipformer-en-2023-06-21`
+
+You can override `ASR_DIR` at runtime to point to a different model directory if you copy your own models into the container.
 
 ## Smoke tests (included clients)
 
@@ -147,7 +153,7 @@ If you see `OnlineRecognizer() takes no arguments` or missing config classes:
 3. **Avoid config objects:** They're internal and not exported in some wheel builds
 
 ### Common issues:
-- **"missing chunked *.onnx":** You're using a model pack without chunked streaming exports (like 2023-06-21). Use 2023-06-26 or re-export with chunked streaming enabled
+- **"missing chunked *.onnx":** You're using a model pack without chunked streaming exports (like 2023-06-21). Use 2023-06-21 or re-export with chunked streaming enabled
 - **Poor real-time performance (RTF > 1.0):** Check logs for chunked file usage; should see "using encoder=...chunk..." in startup logs  
 - **"Please compile with -DSHERPA_ONNX_ENABLE_GPU=ON":** You're using PyPI sherpa-onnx (no GPU). Use the CUDA wheel instead: `sherpa-onnx==1.12.14+cuda12.cudnn9`
 - **`import onnxruntime` fails:** CUDA wheel bundles ORT natively - no Python `onnxruntime` module available (this is expected!)
@@ -199,5 +205,5 @@ bash docker/publish.sh
 
 ## Sources
 - **Sherpa-ONNX GPU install:** `https://k2-fsa.github.io/sherpa/onnx/python/install.html`
-- **Streaming Zipformer (EN):** `https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html#streaming-zipformer-en-2023-06-26`
+- **Streaming Zipformer (EN):** `https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html#streaming-zipformer-en-2023-06-21`
 - **sherpa-onnx releases:** `https://github.com/k2-fsa/sherpa-onnx/releases`
