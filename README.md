@@ -74,15 +74,17 @@ Server starts at `ws://0.0.0.0:8000/ws`.
 - `WS_PORT` (default `8000`)
 - `SAMPLE_RATE` (default `16000`)
 - `PROVIDER` (`cuda` or `cpu`, default `cuda`)
-- `NUM_THREADS` (ONNX Runtime threads, default `6`)
+- `NUM_THREADS` (ONNX Runtime threads, default `1`)
 - `MAX_BATCH` (default `64`)
 - `MAX_CONNECTIONS` (default `2048`)
-- `PARTIAL_HZ` (partials per second per client; default `20`)
+- `PARTIAL_HZ` (partials per second per client; default `30`)
 - `DECODING_METHOD` (`greedy_search` or `modified_beam_search`, default `greedy_search`)
 - `MAX_ACTIVE_PATHS` (beam search width, default `8`)
-- `DRAIN_BUDGET_MS` (decode time budget per loop; default `200`)
+- `DRAIN_BUDGET_MS` (decode time budget per loop; default `100`)
 - `ENDPOINT_RULE1_MS`/`RULE2_MS`/`RULE3_MIN_UTT_MS` (default `800/400/800`)
 - `ASR_DIR` (default `/models/asr/custom-s7-libri-giga-streaming-chunk16`)
+ - `MAX_WAIT_MS` (micro-batch wait ms; default `0`)
+ - `LOOP_SLEEP` (event loop sleep; default `0.0001`)
 
 ## Included model
 During the Docker build a separate builder stage clones the Icefall exporter and the HF checkpoint, runs `export-onnx.py` with `--decode-chunk-len 16`, and copies the outputs into `/models/asr/custom-s7-libri-giga-streaming-chunk16`.
